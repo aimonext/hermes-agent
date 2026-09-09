@@ -77,8 +77,26 @@ def finish_text_response(
     # empty-response warnings on the final response path.
     agent._mute_post_response = False
 
+    # Opt-in silence: an exact ``[[silent]]`` marker with the flag on is kept as the
+    # final response verbatim. All continuation branches below (ack/stall re-prompt,
+    # length joining, dropped-tool-call re-prompt) are bypassed so the turn ends here;
+    # the marker row is appended by the shared durable flush, preserving strict role
+    # alternation, and delivery layers swallow it without sending. Past context and the
+    # system prompt are never altered or rebuilt.
+    from agent.empty_response_guard import (
+        SILENT_MARKER as _SILENT_MARKER,
+        is_silent_response as _is_silent_response,
+        silent_allowed as _silent_allowed,
+    )
+    _is_silent = _is_silent_response(final_response) and _silent_allowed(agent)
+    if _is_silent:
+        final_response = _SILENT_MARKER
+        _turn_exit_reason = "silent_response"
+        agent._empty_content_retries = 0
+        agent._thinking_prefill_retries = 0
+
     # Think-block-only / empty content: recovery path.
-    if not agent._has_content_after_think_block(final_response):
+    if not _is_silent and not agent._has_content_after_think_block(final_response):
         _ev = recover_empty_response(
             agent, assistant_message, response, finish_reason, final_response=final_response,
             messages=messages, api_messages=api_messages, conversation_history=conversation_history,
@@ -121,12 +139,13 @@ def finish_text_response(
     # Said-continue-but-stopped guard: no tool calls but the short reply TAILS with an
     # announced next action. Reuses the SAME bounded continuation counter (max 2 per turn).
     _stall_continue_intent = (
-        bool(getattr(agent, "_stall_guards", True))
+        not _is_silent
+        and bool(getattr(agent, "_stall_guards", True))
         and agent.valid_tool_names
         and codex_ack_continuations < 2
         and trailing_continue_intent(agent._strip_think_blocks(final_response or ""))
     )
-    if _stall_continue_intent or (
+    if not _is_silent and (_stall_continue_intent or (
         _ack_mode != "off"
         and agent.valid_tool_names
         and codex_ack_continuations < 2
@@ -134,7 +153,7 @@ def finish_text_response(
             user_message=user_message, assistant_content=final_response, messages=messages,
             require_workspace=(_ack_mode == "codex_only"),
         )
-    ):
+    )):
         if _stall_continue_intent:
             logger.info(
                 "Stall guard: turn ending on trailing continue-"
@@ -154,7 +173,7 @@ def finish_text_response(
 
     codex_ack_continuations = 0
 
-    if truncated_response_parts:
+    if not _is_silent and truncated_response_parts:
         final_response = _join_truncated_parts([*truncated_response_parts, final_response])
         truncated_response_parts = []
         length_continue_retries = 0
@@ -170,8 +189,10 @@ def finish_text_response(
 
     # Dropped tool-call recovery (copilot/Claude): finish_reason="tool_calls" with empty
     # tool_calls would end the turn unstarted; re-prompt (max 3 CONSECUTIVE stalls).
+    # Bypassed for opted-in silence — the marker is the turn's final answer.
     if (
-        finish_reason == "tool_calls"
+        not _is_silent
+        and finish_reason == "tool_calls"
         and not assistant_message.tool_calls
         and getattr(agent, "_dropped_toolcall_retries", 0) < 3
     ):
@@ -236,7 +257,7 @@ def finish_text_response(
             exc_info=True,
         )
 
-    _turn_exit_reason = f"text_response(finish_reason={finish_reason})"
+    _turn_exit_reason = _turn_exit_reason if _is_silent else f"text_response(finish_reason={finish_reason})"
     if not agent.quiet_mode:
         agent._safe_print(f"🎉 Conversation completed after {api_call_count} OpenAI-compatible API call(s)")
     return _verdict("break")

@@ -56,6 +56,14 @@ REDUCED_EMPTY_RETRY_BUDGET = 1
 DEFAULT_COST_THRESHOLD_USD = Decimal("0.25")
 DEFAULT_GUARD_ENABLED = True
 
+# Opt-in silence signal: a final response that is EXACTLY this marker (after
+# stripping) means the model intentionally stays silent. Gated by the
+# ``agent.allow_silent_responses`` config flag (default False) via
+# ``silent_allowed`` — never matched on substrings, so prose discussing the
+# marker is ordinary text.
+SILENT_MARKER = "[[silent]]"
+_SILENT_ATTR = "_allow_silent_responses"
+
 # Agent-object attribute names. State is scoped to one consecutive empty streak: cleared
 # whenever ``_empty_content_retries == 0`` at record time, so every existing counter-reset
 # site (turn start, compaction, tool success, fallback activation) is honoured.
@@ -108,6 +116,19 @@ def guard_enabled(agent: Any) -> bool:
     """Config-resolved enabled flag; agents built without config default to enabled."""
     value = getattr(agent, _ENABLED_ATTR, DEFAULT_GUARD_ENABLED)
     return value if isinstance(value, bool) else DEFAULT_GUARD_ENABLED
+
+
+def is_silent_response(content: Any) -> bool:
+    """True when ``content`` is exactly the ``[[silent]]`` marker (whitespace-tolerant).
+
+    Anchored equality — messages that merely contain the marker stay ordinary text.
+    """
+    return isinstance(content, str) and content.strip() == SILENT_MARKER
+
+
+def silent_allowed(agent: Any) -> bool:
+    """Opt-in gate for ``[[silent]]``; agents built without config default to disallowed."""
+    return bool(getattr(agent, _SILENT_ATTR, False))
 
 
 def _cost_threshold_usd(agent: Any) -> Decimal:

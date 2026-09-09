@@ -96,6 +96,11 @@ def _terminal_empty(agent: Any, assistant_message: Any, finish_reason: str, mess
     """Retries and fallback exhausted: persist the ``(empty)`` sentinel row and return the
     delivery text. Reasoning is surfaced ONLY here, for delivery — the persisted row keeps
     the sentinel so later "continue" turns don't replay it and loop on empties."""
+    if _empty_guard.is_silent_response(
+        getattr(assistant_message, "content", None)
+    ) and _empty_guard.silent_allowed(agent):
+        # Defense in depth: an opted-in silence marker must never degrade to ``(empty)``.
+        return _empty_guard.SILENT_MARKER
     _streak_cost = _empty_guard.streak_cost_usd(agent)
     if _streak_cost is not None:
         agent._buffer_status(
@@ -158,6 +163,18 @@ def recover_empty_response(
             turn_exit_reason=_turn_exit_reason, active_system_prompt=active_system_prompt,
             preflight_compression_blocked=_preflight_compression_blocked,
         )
+
+    # Opt-in silence BEFORE the retry ladder: an exact ``[[silent]]`` marker with the
+    # flag on ends the turn immediately — no retries, no fallback, no ``(empty)``.
+    # Past context is untouched (no rows appended, no prompt rebuild); the durable
+    # marker row is written by the final-response flush, preserving role alternation.
+    _raw_silent = getattr(assistant_message, "content", None) or final_response or ""
+    if _empty_guard.is_silent_response(_raw_silent) and _empty_guard.silent_allowed(agent):
+        logger.info("Opt-in silent response — ending turn with no user-visible reply")
+        agent._empty_content_retries = 0
+        final_response = _empty_guard.SILENT_MARKER
+        _turn_exit_reason = "silent_response"
+        return _verdict("break")
 
     # Partial stream recovery: content streamed before the connection died becomes the
     # final response instead of fallback or retries.

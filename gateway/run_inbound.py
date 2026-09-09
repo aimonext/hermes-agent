@@ -14,6 +14,7 @@ import concurrent.futures
 import dataclasses
 import json
 import os
+import random
 import re
 import time
 from contextlib import suppress
@@ -1250,6 +1251,44 @@ class GatewayInboundMixin:
         self._persist_active_agents()
         _run_generation = self._begin_session_run_generation(_quick_key)
 
+        # USER PREF (ayesha): WhatsApp humanized reply timing. If the conversation is cold
+        # (>= human_idle_seconds since last user activity, or brand-new), sleep a random amount
+        # in [human_delay_min_seconds, human_delay_max_seconds] before running the agent, so a
+        # message after hours of silence is not answered instantly (a human wouldn't be).
+        # Active chats and all other platforms reply immediately. Log-only on any failure.
+        _humanize_cfg = {}
+        with suppress(Exception):
+            _humanize_cfg = (getattr(self, "config", None) or {}).get("platforms", {}).get("whatsapp", {}) or {}
+        _humanize_enabled = bool(str(_humanize_cfg.get("human_enabled", False)).strip().lower() in {"1", "true", "yes", "on"})
+        if (
+            _humanize_enabled
+            and not is_internal
+            and getattr(source, "platform", None) == Platform.WHATSAPP
+        ):
+            try:
+                _idle_secs = int(_humanize_cfg.get("human_idle_seconds", 7200))
+                _dmin = max(0, int(_humanize_cfg.get("human_delay_min_seconds", 120)))
+                _dmax = max(_dmin, int(_humanize_cfg.get("human_delay_max_seconds", 600)))
+                _entry = await self.async_session_store.lookup_by_session_key(_quick_key)
+                _now = time.time()
+                if _entry is None or _entry.updated_at is None:
+                    _cold = True
+                else:
+                    try:
+                        _last_ts = _entry.updated_at.timestamp()
+                    except Exception:
+                        _last_ts = 0.0
+                    _cold = _now - _last_ts >= _idle_secs
+                if _cold:
+                    _wait = random.randint(_dmin, _dmax)
+                    logger.info(
+                        "[ayesha-humanize] WhatsApp session %s cold (idle >= %ss); sleeping %ss before replying.",
+                        _quick_key, _idle_secs, _wait,
+                    )
+                    await asyncio.sleep(_wait)
+            except Exception as _he:
+                logger.warning("Unexpected error in humanized-delay block (continuing turn): %s", _he)
+
         try:
             try:
                 _agent_result = await self._handle_message_with_agent(event, source, _quick_key, _run_generation)
@@ -1262,11 +1301,9 @@ class GatewayInboundMixin:
                     "the user must resend",
                     _quick_key, exc.session_id,
                 )
-                return (
-                    "⏳ Another turn is still running on this session. To "
-                    "protect the transcript, this message was not processed. "
-                    "Wait for the active turn to finish, then resend it."
-                )
+                # USER PREF (ayesha): silent — no error text in chat.
+                logger.warning("Turn rejected for %s on session %s after lease timeout (silent mode).", _quick_key, exc.session_id)
+                return ""
             try:
                 await self._run_post_turn_hooks(
                     agent_result=_agent_result, source=source, is_internal=is_internal, event=event,

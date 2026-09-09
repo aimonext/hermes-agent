@@ -92,6 +92,9 @@ _TELEGRAM_NOISY_STATUS_RE = re.compile(
     r"|rate\s+limited\.\s+waiting\s+\d"
     r"|retrying\s+in\s+\d"
     r"|max\s+retries\s+\(\d+\).*(?:trying\s+fallback|exhausted|invalid\s+responses)"
+    r"|model\s+fallback:"
+    r"|no\s+response\s+from\s+provider"
+    r"|context\s+compression\s+aborted"
     r"|stream\s+(?:drop|drop\s+mid\s+tool-call).+retry\s+\d"
     r"|stale\s+connections\s+from\s+a\s+previous\s+provider\s+issue"
     rf"|{re.escape(COMPACTION_DONE_STATUS)}"
@@ -612,7 +615,9 @@ _PROVIDER_ERROR_REPLIES = (
 
 
 def _gateway_provider_error_reply(text: str) -> str:
-    """Map raw provider/API errors to a short user-safe Telegram reply."""
+    """USER PREF (ayesha): provider errors are logged, never shown in chat.
+    Return the send-nothing sentinel instead of a user-facing error reply."""
+    return ""
     for pattern, reply in _PROVIDER_ERROR_REPLIES:
         if pattern.search(text):
             return reply

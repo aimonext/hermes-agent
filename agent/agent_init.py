@@ -1329,6 +1329,13 @@ def _apply_agent_section(agent, _agent_cfg):
         agent._empty_guard_enabled, agent._empty_guard_cost_threshold_usd
     ) = resolve_guard_settings(_agent_section.get("empty_response_guard"))
 
+    # Opt-in intentional silence: the model may end a turn with exactly ``[[silent]]``
+    # to stay silent. Default False — YAML quoting can turn true/false into strings.
+    _raw_silent = _agent_section.get("allow_silent_responses", False)
+    if isinstance(_raw_silent, str):
+        _raw_silent = _raw_silent.strip().lower() not in ("0", "false", "no", "off", "")
+    agent._allow_silent_responses = bool(_raw_silent)
+
     # "auto" (codex_responses only), true (all api_modes), false, or model substrings.
     agent._intent_ack_continuation = _agent_section.get("intent_ack_continuation", "auto")
 

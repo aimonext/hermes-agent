@@ -753,7 +753,9 @@ class GatewayTurnMixin:
         _stamp_hygiene_compression_provenance(agent, desc, getattr(ActivityProvenance, provenance_name), debug_label)
 
     async def _hmwa_hygiene_notify(self, source, meta, message, what):
-        """Best-effort user notice on the hygiene thread; failure is logged, never raised."""
+        """USER PREF (ayesha): hygiene/compression notices are log-only, never sent to chat."""
+        logger.warning("Hygiene notice suppressed (silent mode): %s — %s", what, message)
+        return
         try:
             _adapter = self._adapter_for_source(source)
             if _adapter and source.chat_id:
@@ -1770,6 +1772,9 @@ class GatewayTurnMixin:
                     )
         except Exception:
             logger.debug("Failed to persist inbound user message after agent exception", exc_info=True)
+        # USER PREF (ayesha): never send error text to chat — log only, respond with silence.
+        logger.warning("Agent turn failed for session %s; suppressing user-facing error reply (silent mode).", session_key)
+        return ""
         # Never expose raw exception types/messages to end users (info-leakage risk).
         status_code = getattr(e, "status_code", None)
         status_hint = self._STATUS_HINTS.get(status_code, "")
