@@ -166,6 +166,59 @@ def decompose_triage_task(
     return child_ids
 
 
+def fanout_mission_task(
+    conn: sqlite3.Connection, task_id: str, *, children: list[dict],
+    author: Optional[str] = None, auto_promote: bool = True,
+) -> Optional[list[str]]:
+    """Deterministic (LLM-free) fan-out for mission tasks: create ``children``
+    as ``todo`` tickets linked under ``task_id``. Unlike
+    :func:`decompose_triage_task` the root may be in any status and keeps its
+    status/assignee — only the children are new. Reruns are no-ops once a
+    ``mission_fanout`` event exists for the root. Atomic like the triage path.
+    """
+    from hermes_cli.kanban_db import (
+        _append_event, _insert_comment, _link, write_txn, recompute_ready,
+    )
+
+    if not children:
+        return None
+    _validate_children_graph(children)
+    with write_txn(conn):
+        root_row = conn.execute(
+            "SELECT id, status, tenant, workspace_kind, workspace_path "
+            "FROM tasks WHERE id = ?", (task_id,),
+        ).fetchone()
+        if root_row is None:
+            return None
+        if conn.execute(
+            "SELECT 1 FROM task_events WHERE task_id = ? AND kind = 'mission_fanout' LIMIT 1",
+            (task_id,),
+        ).fetchone():
+            return None
+        now = int(time.time())
+        child_ids = [
+            _insert_decomposed_child(conn, task_id, root_row, child, author, now)
+            for child in children
+        ]
+        for idx, child in enumerate(children):
+            for p_idx in child.get("parents") or []:
+                parent_id, child_id = child_ids[p_idx], child_ids[idx]
+                _link(conn, parent_id, child_id)
+                _append_event(conn, child_id, "linked", {"parent": parent_id, "child": child_id})
+        for cid in child_ids:
+            _link(conn, cid, task_id)
+        if author and author.strip():
+            _insert_comment(
+                conn, task_id, author.strip(),
+                "Mission fan-out into " + ", ".join(child_ids) + ".",
+                now,
+            )
+        _append_event(conn, task_id, "mission_fanout", {"child_ids": child_ids})
+    if auto_promote:
+        recompute_ready(conn)
+    return child_ids
+
+
 def _insert_decomposed_child(
     conn: sqlite3.Connection, root_id: str, root_row: sqlite3.Row, child: dict,
     author: Optional[str], now: int,

@@ -201,6 +201,29 @@ def _cmd_boards_import(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_boards_set_mission(args: argparse.Namespace) -> int:
+    normed, rc = _board_slug_arg(args, "set-mission", must_exist=True)
+    if rc:
+        return rc
+    try:
+        meta = kb.set_board_mission(normed, goal=args.goal, status=args.status)
+    except (OSError, ValueError) as exc:
+        return _err(f"kanban boards set-mission: {exc}")
+    res = {
+        "board": normed,
+        "mission_goal": meta.get("mission_goal", ""),
+        "mission_status": meta.get("mission_status", "none"),
+        "mission_updated_at": meta.get("mission_updated_at", 0),
+    }
+    if _json_out(args, res):
+        return 0
+    if res["mission_goal"]:
+        print(f"Board {normed!r} mission: {res['mission_goal']!r} [{res['mission_status']}]")
+    else:
+        print(f"Board {normed!r} has no mission [{res['mission_status']}].")
+    return 0
+
+
 _BOARD_HANDLERS = {
     "list": _cmd_boards_list, "ls": _cmd_boards_list,
     "create": _cmd_boards_create, "new": _cmd_boards_create,
@@ -209,6 +232,7 @@ _BOARD_HANDLERS = {
     "show": _cmd_boards_show, "current": _cmd_boards_show,
     "rename": _cmd_boards_rename,
     "set-default-workdir": _cmd_boards_set_default_workdir,
+    "set-mission": _cmd_boards_set_mission,
     "export": _cmd_boards_export,
     "import": _cmd_boards_import,
 }

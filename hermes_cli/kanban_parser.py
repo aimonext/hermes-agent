@@ -110,6 +110,12 @@ _BOARD_SPECS = [
         _SLUG,
         _arg("path", nargs="?", help="Absolute path to use as default workdir. Omit to clear."),
     ], help="Set the default workspace path for tasks on a board"),
+    _cmd("set-mission", [
+        _SLUG,
+        _arg("--goal", help="Mission goal text. Empty string clears the mission."),
+        _arg("--status", help="Mission status: none, active, stagnant, or complete."),
+        _json_flag(),
+    ], help="Set or inspect a board's mission goal and status"),
     _cmd("export", [
         _arg("slug", nargs="?", help="Board to export (default: the current board)"),
         _arg("-o", "--output", help="Archive path (default: ./<slug>.tar.gz)"),
