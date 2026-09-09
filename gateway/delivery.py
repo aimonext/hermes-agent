@@ -37,6 +37,19 @@ def _is_silence_narration(content: Optional[str]) -> bool:
     return bool(stripped) and len(stripped) <= 64 and bool(_SILENCE_NARRATION.match(stripped))
 
 
+# Opt-in intentional-silence signal: a final response that is EXACTLY this marker
+# (after stripping) means the model chose to stay silent. Emission is gated by the
+# ``agent.allow_silent_responses`` flag (default False); once emitted, every delivery
+# layer swallows the marker without sending so the literal token never reaches a chat
+# surface. Anchored equality — messages merely containing the marker send normally.
+SILENT_MARKER = "[[silent]]"
+
+
+def is_silent_response(content: Optional[str]) -> bool:
+    """True when ``content`` is exactly the ``[[silent]]`` silence marker."""
+    return isinstance(content, str) and content.strip() == SILENT_MARKER
+
+
 @dataclass(frozen=True)
 class DeliveryTransport:
     """Resolved live transport for one logical delivery platform."""
@@ -51,6 +64,12 @@ class DeliveryTransport:
     async def send(self, logical_platform: Platform, chat_id: str, content: str,
                    metadata: Optional[Dict[str, Any]]) -> Any:
         """Send through this transport while preserving the logical platform."""
+        if is_silent_response(content):
+            # Opt-in silence: never emit the marker to a chat surface. Logged so the
+            # delivery ledger records an intentional skip, not a lost send.
+            logger.info("Skipping delivery of opted-in silent response (platform=%s chat=%s)",
+                        logical_platform, chat_id)
+            return {"success": True, "filtered": "silent", "delivered": False}
         return await (self.adapter.send_for_platform(logical_platform, chat_id, content, metadata=metadata)
                       if self.is_relay else self.adapter.send(chat_id, content, metadata=metadata))
 
@@ -271,6 +290,14 @@ class DeliveryRouter:
         # with nothing on the wire. Cron sends carry job_id in metadata; everything else is filtered.
         # See #77763.
         is_cron_artifact = "job_id" in (metadata or {})
+        if is_silent_response(content):
+            # Opt-in silence: the marker IS the delivery decision — skip the send so the
+            # literal token never reaches a chat surface. Logged so the delivery ledger
+            # records an intentional skip, not a lost send. success=True keeps dead-target
+            # tracking and retry semantics quiet. Unlike silence-narration, cron sends are
+            # NOT exempt: a marker is never a legitimate artifact payload.
+            logger.info("Skipping delivery of opted-in silent response to %s", target.to_string())
+            return {"success": True, "filtered": "silent", "delivered": False}
         if self._filter_silence_narration_enabled() and not is_cron_artifact and _is_silence_narration(content):
             logger.warning("Dropped silence-narration outbound to %s (chat=%s): %r",
                            target.platform.value, target.chat_id, content[:40])

@@ -559,6 +559,47 @@ class WhatsAppAdapter(WhatsAppBehaviorMixin, BasePlatformAdapter):
                 return SendResult(success=False, error=await resp.text())
         except Exception as e:
             return SendResult(success=False, error=str(e))
+    _LIST_LINE_RE = re.compile(r"^\s*(?:[-*•·]|\d+[.)])\s+")
+
+    @classmethod
+    def _split_paragraph_messages(cls, text: str) -> list:
+        """USER PREF (ayesha): split a reply into multiple WhatsApp messages at line
+        breaks, outside code fences. Consecutive list items stay as one message."""
+        parts: list = []
+        buf: list = []
+        in_fence = False
+
+        def _flush():
+            nonlocal buf
+            if buf and any(l.strip() for l in buf):
+                parts.append("\n".join(buf).strip())
+            buf = []
+
+        for line in text.splitlines():
+            stripped = line.strip()
+            if stripped.startswith(("```", "~~~")):
+                if in_fence:
+                    buf.append(line)
+                    _flush()
+                    in_fence = False
+                else:
+                    _flush()
+                    buf.append(line)
+                    in_fence = True
+                continue
+            if in_fence:
+                buf.append(line)
+                continue
+            if not stripped:
+                _flush()
+                continue
+            if cls._LIST_LINE_RE.match(line) and buf and cls._LIST_LINE_RE.match(buf[-1]):
+                buf.append(line)  # same list continues in one message
+                continue
+            _flush()
+            buf.append(line)
+        _flush()
+        return parts or [text]
 
     @_needs_bridge
     async def send(self, chat_id: str, content: str, reply_to: Optional[str] = None, metadata: Optional[Dict[str, Any]] = None) -> SendResult:
@@ -567,7 +608,8 @@ class WhatsAppAdapter(WhatsAppBehaviorMixin, BasePlatformAdapter):
             return SendResult(success=True, message_id=None)
         chat_id = to_whatsapp_jid(chat_id)
         try:
-            chunks = self.truncate_message(self.format_message(content), self._outgoing_chunk_limit())
+            formatted = self.format_message(content)
+            chunks = self.truncate_message(formatted, self._outgoing_chunk_limit()) or [formatted]
             sent_message_ids: list[str] = []
             last_message_id = None
             for idx, chunk in enumerate(chunks):

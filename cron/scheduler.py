@@ -1530,7 +1530,21 @@ def _resolve_job_runtime(
         # OAuth refresh); anything else re-raises.
         is_auth = isinstance(resolve_exc, AuthError)
         is_transient_net = _is_transient_provider_resolve_error(resolve_exc)
-        if not (is_auth or is_transient_net):
+        # Provider-side transient failures (HTTP 429 rate limit / 5xx server errors) must also
+        # walk the fallback chain — otherwise a flaky free-tier primary kills the job before any
+        # healthy fallback rung is tried (#cron-500-fallback).
+        _m = str(resolve_exc).lower()
+        is_provider_transient = bool(
+            re.search(r"http\s*[:= ]*(429|5\d\d)\b", _m)
+            or "internal server error" in _m
+            or "rate limit" in _m
+            or "resource_exhausted" in _m
+            or "overloaded" in _m
+            or "bad gateway" in _m
+            or "service unavailable" in _m
+            or "insufficient" in _m and "balance" in _m
+        )
+        if not (is_auth or is_transient_net or is_provider_transient):
             raise RuntimeError(format_runtime_provider_error(resolve_exc)) from resolve_exc
 
         primary_provider_for_drift = (

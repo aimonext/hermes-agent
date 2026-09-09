@@ -62,6 +62,12 @@ _FALSY = {"0", "false", "no", "off"}
 
 _SLACK = Platform.SLACK.value
 
+# Opt-in intentional-silence signal (mirrors gateway/delivery.py:SILENT_MARKER and
+# agent/empty_response_guard.py:SILENT_MARKER): a final response that is EXACTLY this
+# marker means the model chose to stay silent. Both egress doors swallow it without
+# sending — anchored equality, never a substring match.
+_SILENT_MARKER = "[[silent]]"
+
 # Prompt option id -> in-channel ack label (the option set doubles as the choice allowlist).
 _EXEC_APPROVAL_LABELS = {
     "once": "✅ Approved once",
@@ -1293,6 +1299,13 @@ class RelayAdapter(BasePlatformAdapter):
         persisted-home deliveries have no fresh inbound event to populate
         ``_platform_by_chat``. The delivery resolver calls this only after
         ``fronts_platform`` succeeds; repeated here fail-closed."""
+        if isinstance(content, str) and content.strip() == _SILENT_MARKER:
+            # Opt-in silence: never emit the marker to the connector, and never let an
+            # open native stream absorb it via seal-interception. Logged so the delivery
+            # ledger records an intentional skip, not a lost send.
+            logger.info("Skipping opted-in silent response (relay platform=%s chat=%s)",
+                        getattr(logical_platform, "value", logical_platform), chat_id)
+            return SendResult(success=True, message_id=None)
         platform_value = str(getattr(logical_platform, "value", logical_platform))
         if not self.fronts_platform(platform_value):
             return SendResult(success=False, error=f"relay does not front platform {platform_value}")
@@ -1387,6 +1400,12 @@ class RelayAdapter(BasePlatformAdapter):
     ) -> SendResult:
         send_metadata = dict(metadata or {})
         explicit_platform = send_metadata.pop("_relay_logical_platform", None)
+        if isinstance(content, str) and content.strip() == _SILENT_MARKER:
+            # Opt-in silence: never emit the marker to the connector, and never let an
+            # open native stream absorb it via seal-interception. Logged so the delivery
+            # ledger records an intentional skip, not a lost send.
+            logger.info("Skipping opted-in silent response (relay chat=%s)", chat_id)
+            return SendResult(success=True, message_id=None)
         # Consumer-declared interim send (commentary, tail flush): NOT the turn-final,
         # so it must never trigger seal-interception (sealing the live stream with
         # interim text orphans the true final into a plain duplicate).
