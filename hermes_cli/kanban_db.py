@@ -539,6 +539,10 @@ def read_board_metadata(board: Optional[str] = None) -> dict:
         "default_workdir": None,
         # Project scope: new tasks inherit it (deterministic worktree + branch).
         "project_id": None,
+        # Mission layer: a board can carry one active mission goal.
+        "mission_goal": "",
+        "mission_status": "none",
+        "mission_updated_at": 0,
         "created_at": None,
         "archived": False,
     }
@@ -561,10 +565,13 @@ def write_board_metadata(
     board: Optional[str], *, name: Optional[str] = None, description: Optional[str] = None,
     icon: Optional[str] = None, color: Optional[str] = None, archived: Optional[bool] = None,
     default_workdir: Optional[str] = None, project_id: Optional[str] = None,
+    mission_goal: Optional[str] = None, mission_status: Optional[str] = None,
 ) -> dict:
     """Create/update ``board.json``; unmentioned fields are preserved, ``created_at``
     set on first write. ``project_id``/``default_workdir``: ``None`` = unchanged,
-    "" = clear (``project_id`` is not validated here)."""
+    "" = clear (``project_id`` is not validated here). ``mission_goal``: ``None`` =
+    unchanged, "" = clear the mission. ``mission_status`` must be one of
+    none/active/stagnant/complete."""
     _assert_not_delegated_child_mutation()
     slug = _slug_or_default(board)
     meta = read_board_metadata(slug)
@@ -580,6 +587,19 @@ def write_board_metadata(
     for key, value in (("default_workdir", default_workdir), ("project_id", project_id)):
         if value is not None:
             meta[key] = str(value) if value else None
+    if mission_goal is not None:
+        meta["mission_goal"] = str(mission_goal)
+        meta["mission_updated_at"] = int(time.time())
+        if not mission_goal and meta.get("mission_status") != "none":
+            meta["mission_status"] = "none"
+    if mission_status is not None:
+        normed_status = str(mission_status).strip().lower()
+        if normed_status not in ("none", "active", "stagnant", "complete"):
+            raise ValueError(
+                f"mission_status must be one of none/active/stagnant/complete, got {mission_status!r}"
+            )
+        meta["mission_status"] = normed_status
+        meta["mission_updated_at"] = int(time.time())
     if not meta.get("created_at"):
         meta["created_at"] = int(time.time())
     path = board_metadata_path(slug)
@@ -589,6 +609,16 @@ def write_board_metadata(
     )
     meta["db_path"] = str(kanban_db_path(slug))
     return meta
+
+
+def set_board_mission(
+    board: Optional[str], *, goal: Optional[str] = None, status: Optional[str] = None,
+) -> dict:
+    """Set a board's mission goal and/or status. Clearing the goal (``""``)
+    resets the status to ``none``. Returns the merged metadata."""
+    if goal is None and status is None:
+        return read_board_metadata(board)
+    return write_board_metadata(board, mission_goal=goal, mission_status=status)
 
 
 def create_board(
