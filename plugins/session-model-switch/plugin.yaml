@@ -1,0 +1,12 @@
+name: session-model-switch
+version: 0.1.0
+description: Per-session model switch for private adult chat (session-scoped, no global config mutation)
+author: Aimon (shoykot) — impl by hermes-agent subagent
+provides_hooks:
+  - pre_gateway_dispatch
+# pre_gateway_dispatch is a policy gate: not timeout-bounded, runs synchronously.
+# No tools, no extra capabilities needed.
+manifest_version: 2
+api_version: 1
+license: MIT
+tags: [gateway, session, model-routing]
