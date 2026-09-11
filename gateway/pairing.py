@@ -523,6 +523,61 @@ class PairingStore:
                     return self._finish_approval(platform, pending, entry_id, entry)
             return None
 
+    def get_pending_for_user(self, platform: str, user_id: str) -> Optional[tuple]:
+        """Live (non-expired) pending entry for a user, if any.
+
+        Returns ``(entry_id, entry_copy)`` or ``None``. Powers greet-first
+        pairing: first contact only greets, the code is revealed on the next
+        message once the newcomer has introduced themselves.
+        """
+        with self._lock:
+            self._cleanup_expired(platform)
+            normalized = _normalize_user_id(platform, user_id)
+            pending = self._load_json(self._pending_path(platform))
+            for entry_id, entry in pending.items():
+                if (
+                    isinstance(entry, dict)
+                    and _is_hashed_entry(entry)
+                    and entry.get("user_id") == normalized
+                ):
+                    return entry_id, dict(entry)
+            return None
+
+    def save_pending_intro(self, platform: str, entry_id: str, intro: str) -> bool:
+        """Attach a newcomer's self-introduction to their pending entry.
+
+        Shown in ``list_pending`` so the owner can vet before approving.
+        """
+        intro = str(intro or "").strip()[:300]
+        if not intro:
+            return False
+        with self._lock:
+            self._cleanup_expired(platform)
+            path = self._pending_path(platform)
+            pending = self._load_json(path)
+            entry = pending.get(entry_id)
+            if not isinstance(entry, dict) or not _is_hashed_entry(entry):
+                return False
+            entry["user_intro"] = intro
+            self._save_json(path, pending)
+            return True
+
+    def first_approved_user(self, platform: str) -> Optional[dict]:
+        """Earliest-approved user on a platform — treated as the owner.
+
+        Used to forward newcomer introductions for pairing decisions.
+        """
+        approved = self._load_json(self._approved_path(platform))
+        best = None
+        for uid, info in approved.items():
+            if not isinstance(info, dict):
+                continue
+            if best is None or info.get("approved_at", 0) < best[1].get("approved_at", 0):
+                best = (uid, info)
+        if best is None:
+            return None
+        return {"user_id": best[0], "user_name": best[1].get("user_name", "")}
+
     def list_pending(self, platform: str = None) -> list:
         """List pending requests (codes are never returned; each exposes a ``request_id``
         for :meth:`approve_request`; legacy pre-hash entries report an empty id)."""
@@ -541,6 +596,8 @@ class PairingStore:
                         "user_id": info.get("user_id", ""), "user_name": info.get("user_name", ""),
                         "age_minutes": int((time.time() - created_at) / 60),
                     })
+                    if isinstance(info, dict) and info.get("user_intro"):
+                        results[-1]["user_intro"] = info["user_intro"]
         return results
 
     def clear_pending(self, platform: str = None) -> int:

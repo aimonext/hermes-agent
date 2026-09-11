@@ -703,3 +703,98 @@ class TestProfileScopedStorage:
         )
 
 
+
+
+class TestGreetFirstPairing:
+    """Greet-first pairing: intro before code, owner notified."""
+
+    def test_get_pending_for_user_roundtrip(self, tmp_path):
+        store = _make_store(tmp_path)
+        assert store.get_pending_for_user("telegram", "999") is None
+        code = store.generate_code("telegram", "999", "New Guy")
+        assert code
+        found = store.get_pending_for_user("telegram", "999")
+        assert found is not None
+        entry_id, entry = found
+        assert entry["user_id"] == "999"
+        assert store.save_pending_intro("telegram", entry_id, "hi, friend of aimon") is True
+        assert store.get_pending_for_user("telegram", "999")[1]["user_intro"] == "hi, friend of aimon"
+
+    def test_expired_pending_not_returned(self, tmp_path):
+        store = _make_store(tmp_path)
+        store.generate_code("telegram", "999", "New Guy")
+        pending_path = store._pending_path("telegram")
+        data = json.loads(pending_path.read_text())
+        for entry in data.values():
+            entry["created_at"] = time.time() - 99999
+        pending_path.write_text(json.dumps(data))
+        assert store.get_pending_for_user("telegram", "999") is None
+
+    def test_intro_truncated_to_300(self, tmp_path):
+        store = _make_store(tmp_path)
+        store.generate_code("telegram", "999", "New Guy")
+        entry_id, _ = store.get_pending_for_user("telegram", "999")
+        assert store.save_pending_intro("telegram", entry_id, "x" * 500) is True
+        assert len(store.get_pending_for_user("telegram", "999")[1]["user_intro"]) == 300
+        assert store.save_pending_intro("telegram", "no-such-id", "hi") is False
+
+    def test_first_approved_user_is_earliest(self, tmp_path):
+        store = _make_store(tmp_path)
+        store._approve_user("telegram", "222", "Second")
+        store._approve_user("telegram", "111", "Owner")
+        # Backdate 111 to be earlier
+        path = store._approved_path("telegram")
+        data = json.loads(path.read_text())
+        data["111"]["approved_at"] = data["222"]["approved_at"] - 100
+        path.write_text(json.dumps(data))
+        owner = store.first_approved_user("telegram")
+        assert owner["user_id"] == "111"
+        assert store.first_approved_user("discord") is None
+
+
+@pytest.mark.asyncio
+async def test_greet_first_flow_sends_intro_then_code(tmp_path):
+    """First DM gets greeting (no code); second DM gets code; owner gets intro."""
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    from gateway.config import Platform
+    from gateway.run_inbound import GatewayInboundMixin
+    from gateway.session import SessionSource
+
+    store = _make_store(tmp_path)
+    store._approve_user("telegram", "111", "Owner")
+    adapter = SimpleNamespace(send=AsyncMock())
+    from types import MethodType
+
+    from gateway.run_inbound import GatewayInboundMixin as _Mixin
+
+    fake_self = SimpleNamespace(
+        _pairing_store_for=lambda source: store,
+        _adapter_for_source=lambda source: adapter,
+    )
+    fake_self._hm_notify_pairing_owner = MethodType(_Mixin._hm_notify_pairing_owner, fake_self)
+    source = SessionSource(
+        platform=Platform.TELEGRAM, user_id="999", chat_id="999",
+        user_name="NewGuy", chat_type="dm", profile=None,
+    )
+    # First contact: greeting only, no code leaked
+    await GatewayInboundMixin._hm_offer_pairing_code(fake_self, source, "hello")
+    assert adapter.send.await_count == 1
+    greet = adapter.send.await_args[0][1]
+    assert "pairing code" not in greet
+    assert "approve" not in greet
+    assert store.get_pending_for_user("telegram", "999") is not None
+
+    # Second contact with intro: code revealed + owner notified with intro.
+    # (Clear the 10-min reveal rate limit first to simulate a later message.)
+    _limits_path = store._rate_limit_path()
+    _limits = json.loads(_limits_path.read_text())
+    _limits_path.write_text(json.dumps({k: 0 for k in _limits}))
+    await GatewayInboundMixin._hm_offer_pairing_code(fake_self, source, "I am Bob, Aimon's friend")
+    assert adapter.send.await_count == 3
+    code_msg = adapter.send.await_args_list[1][0][1]
+    owner_msg = adapter.send.await_args_list[2][0][1]
+    assert "pairing code" in code_msg
+    assert "I am Bob" in owner_msg
+    assert store.get_pending_for_user("telegram", "999")[1]["user_intro"] == "I am Bob, Aimon's friend"

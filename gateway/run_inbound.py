@@ -76,39 +76,86 @@ class GatewayInboundMixin:
                 break
         return event
 
-    async def _hm_offer_pairing_code(self, source: SessionSource) -> None:
-        """DM an unauthorized sender a pairing code (rate-limited; groups never reach here)."""
+    async def _hm_offer_pairing_code(self, source: SessionSource, event_text: str = "") -> None:
+        """Greet-first pairing for unauthorized DMs (rate-limited; groups never reach here).
+
+        First contact gets a greeting asking for an introduction — no code is
+        revealed. When the newcomer replies, their words are saved as the intro
+        on the pending request, the code is revealed, and the owner (earliest
+        approved user on that platform) is notified with the intro so they can
+        decide. Intro-saving always happens; code reveal + owner ping stay
+        rate-limited so DM floods cannot spam.
+        """
         platform_name = source.platform.value if source.platform else "unknown"
         pairing_store = self._pairing_store_for(source)
         if pairing_store is None:
             logger.error("Cannot offer pairing code on %s: no pairing store", platform_name)
             return
-        # Rate-limit ALL pairing responses (code or rejection) so a burst of DMs doesn't spam.
+        adapter = self._adapter_for_source(source)
+        existing = pairing_store.get_pending_for_user(platform_name, source.user_id)
+        if existing is None:
+            # First contact: greet + ask who they are. A code is generated
+            # (which also records the rate limit) but NEVER revealed yet.
+            if pairing_store._is_rate_limited(platform_name, source.user_id):
+                return
+            if not pairing_store.generate_code(platform_name, source.user_id, source.user_name or ""):
+                return
+            if adapter:
+                await adapter.send(
+                    source.chat_id,
+                    "Hi~ I don't recognize you yet! 🙂\n\n"
+                    "Tell me who you are — your name and how you know the bot owner — "
+                    "and I'll pass it on for approval.",
+                )
+            return
+        entry_id, _entry = existing
+        intro = (event_text or "").strip()
+        if intro:
+            pairing_store.save_pending_intro(platform_name, entry_id, intro)
+        # Rate-limit the reveal + owner ping; the intro above is already saved.
         if pairing_store._is_rate_limited(platform_name, source.user_id):
             return
         code = pairing_store.generate_code(platform_name, source.user_id, source.user_name or "")
-        adapter = self._adapter_for_source(source)
-        if code:
-            store_profile = getattr(pairing_store, "profile", None)
-            profile_arg = (
-                f"-p {store_profile} "
-                if isinstance(store_profile, str) and store_profile and store_profile != "default"
-                else ""
-            )
-            reply = (
-                f"Hi~ I don't recognize you yet!\n\n"
+        if not code:
+            return
+        store_profile = getattr(pairing_store, "profile", None)
+        profile_arg = (
+            f"-p {store_profile} "
+            if isinstance(store_profile, str) and store_profile and store_profile != "default"
+            else ""
+        )
+        if adapter:
+            await adapter.send(
+                source.chat_id,
+                f"Thanks! I've passed your introduction to the owner. 🫡\n\n"
                 f"Here's your pairing code: `{code}`\n\n"
                 f"Ask the bot owner to run:\n"
                 f"`hermes {profile_arg}pairing approve "
-                f"{platform_name} {code}`"
+                f"{platform_name} {code}`",
             )
-        else:
-            reply = "Too many pairing requests right now~ Please try again later!"
-        if adapter:
-            await adapter.send(source.chat_id, reply)
-        if not code:
-            # Record rate limit so subsequent messages are silently ignored
-            pairing_store._record_rate_limit(platform_name, source.user_id)
+        await self._hm_notify_pairing_owner(pairing_store, adapter, source, code, intro or "(no introduction given)")
+
+    async def _hm_notify_pairing_owner(self, pairing_store, adapter, source, code: str, intro: str) -> None:
+        """Best-effort DM to the owner about a newcomer. Never breaks pairing."""
+        try:
+            platform_name = source.platform.value if source.platform else "unknown"
+            owner = pairing_store.first_approved_user(platform_name)
+            if not owner or not adapter:
+                return
+            if str(owner.get("user_id", "")) == str(source.user_id):
+                return
+            name = source.user_name or "unknown"
+            owner_chat = owner.get("user_id")
+            if not owner_chat:
+                return
+            await adapter.send(
+                owner_chat,
+                f"🔔 New pairing request on {platform_name} from {name} ({source.user_id}):\n"
+                f"Intro: {intro[:300]}\n"
+                f"Code: `{code}` — approve with: `hermes pairing approve {platform_name} {code}`",
+            )
+        except Exception:
+            logger.warning("Pairing owner notify failed", exc_info=True)
 
     async def _hm_admit_event(
         self, event: "MessageEvent"
@@ -196,7 +243,7 @@ class GatewayInboundMixin:
                 source.chat_type == "dm"
                 and self._get_unauthorized_dm_behavior(source.platform, profile=source.profile) == "pair"
             ):
-                await self._hm_offer_pairing_code(source)
+                await self._hm_offer_pairing_code(source, event.text or "")
             return None
         return event, source, False
 

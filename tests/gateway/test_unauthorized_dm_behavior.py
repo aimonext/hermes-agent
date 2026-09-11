@@ -72,6 +72,8 @@ def _make_runner(platform: Platform, config: GatewayConfig):
     runner.pairing_store = MagicMock()
     runner.pairing_store.is_approved.return_value = False
     runner.pairing_store._is_rate_limited.return_value = False
+    runner.pairing_store.get_pending_for_user.return_value = None
+    runner.pairing_store.first_approved_user.return_value = None
     # Attributes required by _handle_message for the authorized-user path
     runner._running_agents = {}
     runner._running_agents_ts = {}
@@ -221,6 +223,7 @@ async def test_unauthorized_dm_pairs_by_default(monkeypatch):
     runner, adapter = _make_runner(Platform.WHATSAPP, config)
     runner.pairing_store.generate_code.return_value = "ABC12DEF"
 
+    # First DM: greeting asking for intro, code generated but NOT revealed.
     result = await runner._handle_message(
         _make_event(
             Platform.WHATSAPP,
@@ -236,7 +239,21 @@ async def test_unauthorized_dm_pairs_by_default(monkeypatch):
         "tester",
     )
     adapter.send.assert_awaited_once()
+    assert "ABC12DEF" not in adapter.send.await_args.args[1]
+
+    # Second DM with intro: code revealed.
+    runner.pairing_store.get_pending_for_user.return_value = ("req1", {"user_id": "15551234567@s.whatsapp.net"})
+    result = await runner._handle_message(
+        _make_event(
+            Platform.WHATSAPP,
+            "15551234567@s.whatsapp.net",
+            "15551234567@s.whatsapp.net",
+        )
+    )
+    assert result is None
+    assert adapter.send.await_count == 2
     assert "ABC12DEF" in adapter.send.await_args.args[1]
+    runner.pairing_store.save_pending_intro.assert_called_once()
 
 
 @pytest.mark.asyncio
